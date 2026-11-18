@@ -91,7 +91,8 @@ async def _execute(command: str, req: SendMsgRequest, args: list, options: dict)
     original_text = args[1] if command == "msg.send" and len(args) >= 2 else ""
     translated_text = None
     target_lang = ""
-    if command == "msg.send" and len(args) >= 2:
+    # SALESQUICKLY_NO_AGENT_TRANSLATE: skip_plugins 时正文原样下发（Backend 已译好）
+    if command == "msg.send" and len(args) >= 2 and not getattr(req, "skip_plugins", False):
         from agent.plugin import MessageContext
         from agent.plugin.manager import plugin_manager
         ctx = MessageContext(bot_id=req.bot_id, jid=args[0], direction="outgoing", content_type="TEXT", content=args[1], conversation_id=f"{req.bot_id}:{args[0]}")

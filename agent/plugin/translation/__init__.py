@@ -135,11 +135,7 @@ class TranslationPlugin(Plugin):
         return await asyncio.to_thread(google_translate, text, to_lang, from_lang)
 
     async def on_start(self, bot_id: str) -> list[Action]:
-        """Auto-enable if work_lang != target_lang."""
-        cfg = inner_config(plugin_store.get_config(self.name, bot_id))
-        wl = cfg.get("work_lang", "")
-        tl = cfg.get("target_lang", "")
-        if wl and tl and wl != tl:
-            plugin_store.set_enabled(self.name, True, bot_id)
-            logger.info("Translation auto-enabled for bot '%s': %s→%s", bot_id, wl, tl)
+        # SALESQUICKLY_NO_AGENT_TRANSLATE: 禁止按语对自动启用。
+        # 上游会在 work_lang≠target_lang 时 set_enabled(True)，抵消我们启动时的强制关闭，
+        # 再次造成「Backend 已按对方语言处理、agent 再翻成 en」。
         return []

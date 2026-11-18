@@ -175,9 +175,13 @@ class EnvAndroid:
         self.isAxolotlEnable = isAxolotlEnable
 
         #在线计算地址_MD5_CLASSES, classes.dex拖进去就可以
-        # https://the-x.cn/zh-cn/hash/MessageDigestAlgorithm.aspx        
+        # https://the-x.cn/zh-cn/hash/MessageDigestAlgorithm.aspx
+        #
+        # 405 = ClientTooOld：握手 ClientPayload.app_version 过旧会被拒。
+        # 公开上游停在 2.26.27.85（约 2026-08）；现行官方 Android 约 2.26.44.90（2026-11）。
+        # 六段号登录走 version 字段；md5Classes/key 主要用于注册 token，无新 APK 时先抬 version。
 
-        self.version = "2.26.27.85"
+        self.version = "2.26.44.90"
         self.md5Classes = "owSOpAkp8mYPupm/XK4x+A=="        
         self.key = "sdvJhddpcZ+tuNfeaKAEhS+L3M1rg7jC3ka49uKKKbOnggnuN2gUAZLlhItnagVE7d0SPOTPPplfGOowd6240Q=="
 

@@ -60,10 +60,18 @@ def set_access_key(key: Optional[str]) -> None:
     """Configure the access key for this agent instance.
 
     Args:
-        key: The access key string, or None to disable authentication.
+        key: The access key string, or None/empty to disable authentication.
+            Empty string is treated as disabled: docker-compose often expands
+            ``--accesskey ${ZOWSUP_ACCESS_KEY}`` to ``--accesskey ""`` when the
+            env is unset; that must not enable auth (otherwise REST may still
+            work while WS ``/events`` returns 403).
     """
     global _access_key
-    _access_key = key
+    if key is None:
+        _access_key = None
+        return
+    normalized = key.strip()
+    _access_key = normalized if normalized else None
 
 
 def set_agent_id(agent_id: str) -> None:
@@ -93,8 +101,8 @@ def _check_rest_access_key(x_access_key: Optional[str] = Header(None)) -> None:
 
     Raises HTTPException(403) if the key is required but missing/wrong.
     """
-    if _access_key is None:
-        return  # Auth disabled
+    if not _access_key:
+        return  # Auth disabled (None or empty)
     if x_access_key != _access_key:
         raise HTTPException(status_code=403, detail="Invalid or missing access key")
 
@@ -108,7 +116,7 @@ async def _check_ws_access_key(
     Returns True if access is granted, False if denied.
     Caller must close the WebSocket with 4003 on denial.
     """
-    if _access_key is None:
+    if not _access_key:
         return True
     return access_key == _access_key
 
@@ -151,72 +159,26 @@ async def lifespan(app: FastAPI):
     _escalation_queue.start()
     _survey_store.start()
 
-    from agent.plugin.ai import AIPlugin
-    from agent.plugin.translation import TranslationPlugin
-    from agent.plugin.satisfaction import SatisfactionPlugin
-    _plugin_manager.register(TranslationPlugin())
-    _plugin_manager.register(AIPlugin())
-    _plugin_manager.register(SatisfactionPlugin())
+    # SALESQUICKLY_NO_AGENT_TRANSLATE:
+    # 翻译 / AI / 满意度均由 SalesQuickly Backend（或产品侧）负责。
+    # 不注册上游 TranslationPlugin / AIPlugin / SatisfactionPlugin，避免协议 sidecar
+    # 擅自改写出站正文（默认 zh→en）或对客户发问卷。已有 plugin_config.db 强制关掉。
+    _plugin_store.set_config("translation", {
+        "plugin": "translation",
+        "bot_id": "(global)",
+        "enabled": False,
+        "config": {"work_lang": "", "target_lang": "", "provider": "google"},
+    })
+    _plugin_store.set_enabled("translation", False)
+    _plugin_store.set_enabled("ai", False)
+    _plugin_store.set_enabled("satisfaction", False)
+    logger.info("SalesQuickly: agent translation/ai/satisfaction not registered")
 
     # ── Initialize VoIP adapter ──
     from voip.voip_adapter import get_voip_adapter
     voip = get_voip_adapter()
     voip.start()
     logger.info("VoIP adapter initialized")
-
-    # Set defaults only on first run — never overwrite saved config
-    if not _plugin_store.get_config("translation"):
-        _plugin_store.set_config("translation", {
-            "plugin": "translation", "bot_id": "(global)", "enabled": True,
-            "config": {"work_lang": "zh", "target_lang": "en", "provider": "google"},
-        })
-        _plugin_store.set_enabled("translation", True)
-    if not _plugin_store.get_config("satisfaction"):
-        _plugin_store.set_config("satisfaction", {
-            "plugin": "satisfaction", "bot_id": "(global)", "enabled": True,
-            "config": {
-                "inactivity_minutes": 5,
-                "session_gap_hours": 24,
-                "survey_message": "Please rate our service (1-5, 5 being excellent)",
-                "thank_you_message": "Thank you for your feedback! Feel free to reach out anytime.",
-            },
-        })
-    else:
-        # Ensure new config keys exist in existing config (non-destructive merge)
-        sat_cfg = _plugin_store.get_config("satisfaction")
-        inner = sat_cfg.get("config", sat_cfg)  # handle both wrapper and raw formats
-        defaults = {"session_gap_hours": 24}
-        patched = False
-        for k, v in defaults.items():
-            if k not in inner:
-                inner[k] = v
-                patched = True
-        if patched:
-            _plugin_store.set_config("satisfaction", {
-                "plugin": "satisfaction", "bot_id": "(global)", "enabled": True,
-                "config": inner,
-            })
-            logger.info("Patched satisfaction config with new defaults")
-    _plugin_store.set_enabled("satisfaction", True)   # ensure enabled regardless of existing config
-    # Ensure AI plugin defaults to skip "surveying" stage (don't overwrite user config)
-    ai_cfg = _plugin_store.get_config("ai")
-    if not ai_cfg:
-        _plugin_store.set_config("ai", {
-            "plugin": "ai", "bot_id": "(global)", "enabled": False,
-            "config": {"skip_stages": ["surveying", "escalated"]},
-        })
-    else:
-        import json as _json
-        inner = ai_cfg.get("config", ai_cfg)
-        defaults = {"surveying", "escalated"}
-        existing = set(inner.get("skip_stages") or [])
-        missing = defaults - existing
-        if missing:
-            inner["skip_stages"] = sorted(existing | defaults)
-            _plugin_store.set_config("ai", {
-                "plugin": "ai", "bot_id": "(global)", "enabled": _plugin_store.is_enabled("ai"),
-                "config": inner,
-            })
 
     from agent.api.bot_api import router as bot_router
     from agent.api.cmd_api import router as cmd_router

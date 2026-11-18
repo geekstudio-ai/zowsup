@@ -131,15 +131,27 @@ class ConnectionManager:
 
     def on_failure(self, entity):
         """Handle login failure (403/401/405/404)."""
-        self.layer.logger.info("Login Fail")
+        # 405 = ClientTooOld；带上 violation_* 便于对照 env 指纹 / 号码类型
+        self.layer.logger.info(
+            "Login Fail reason=%s violation_reason=%s violation_type=%s entity=%s",
+            getattr(entity, "reason", None),
+            getattr(entity, "violation_reason", None),
+            getattr(entity, "violation_type", None),
+            str(entity).replace("\n", " | "),
+        )
         self.loginFailCount += 1
 
         if entity.reason in ("403", "401", "405", "404"):
+            detail = entity.reason
+            vr = getattr(entity, "violation_reason", None)
+            vt = getattr(entity, "violation_type", None)
+            if vr or vt:
+                detail = f"{entity.reason}:vr={vr}:vt={vt}"
 
             self.layer.callback(
                 event={
                     "event": zowsup_pb2.BotEvent.Event.LOGIN_FAIL,
-                    "detail": entity.reason,
+                    "detail": detail,
                 }
             )
 

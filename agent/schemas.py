@@ -131,6 +131,11 @@ class SendMsgRequest(BaseModel):
     to: str = Field(..., description="Recipient JID, e.g. 8613800138000@s.whatsapp.net")
     content: SendMsgContent = Field(..., description="Message content (text or ad)")
     waitid: Optional[int] = Field(None, ge=1, le=300, description="If set, wait for message ID and return it (timeout in seconds)")
+    # SALESQUICKLY_NO_AGENT_TRANSLATE: 连接器已由 Backend 完成翻译，跳过 agent 出站插件改写
+    skip_plugins: bool = Field(
+        False,
+        description="If true, skip on_before_send plugins (no agent-side re-translation)",
+    )
 
 
 class BotImportRequestItem(BaseModel):

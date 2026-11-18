@@ -73,9 +73,29 @@ class AxolotlReceivelayer(AxolotlBaseLayer):
             self.reset_retries(node["id"])
 
         except exceptions.InvalidKeyIdException:
-            logger.warning("Invalid KeyId for {}, going to send the receipt to ignore subsequence push".format(encMessageProtocolEntity.getAuthor(False)))
-            await self.toLower(OutgoingReceiptProtocolEntity(node["id"], node["from"], participant=node["participant"]).toProtocolTreeNode())
-                               
+            # [salesquickly] 六段号换机/换栈后，对方仍用旧 session 加密时常见 Invalid KeyId。
+            # 上游直接 ACK 丢弃会导致「已上线却收不到消息」；改为与 InvalidMessage 一样发 retry，
+            # 让对方用新 prekey/session 重推。仍失败满 3 次再 ACK 放弃。
+            author = encMessageProtocolEntity.getAuthor(False)
+            if node["id"] in self._retries and self._retries[node["id"]] >= 3:
+                logger.warning(
+                    "Invalid KeyId for {} after retries, sending receipt to drop".format(author)
+                )
+                await self.toLower(
+                    OutgoingReceiptProtocolEntity(
+                        node["id"], node["from"], participant=node["participant"]
+                    ).toProtocolTreeNode()
+                )
+            else:
+                logger.warning(
+                    "Invalid KeyId for {}, requesting retry ({}/3)".format(
+                        author, self._retries.get(node["id"], 0) + 1
+                    )
+                )
+                import asyncio
+                await asyncio.sleep(1)
+                await self.send_retry(node, self.manager.registration_id)
+
         except exceptions.InvalidMessageException:
             logger.warning("InvalidMessage for {}".format(encMessageProtocolEntity.getAuthor(False)))     
             if node["id"] in self._retries and self._retries[node["id"]] >=3:

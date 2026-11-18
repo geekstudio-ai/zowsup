@@ -169,6 +169,12 @@ class MessageHandler:
         if message.get("media_caption"):
             message["text"] = message["media_caption"]
 
+        # [salesquickly patch] 手机号 / LID / 广告来源（见 vendor/README.md）
+        message["senderPn"] = jid
+        message["senderLid"] = lid
+        message["adReply"] = self._salesquickly_ad_reply(messageProtocolEntity)
+        message["adText"] = self._salesquickly_ad_text(messageProtocolEntity)
+
         self.layer.callback(
             message=message,
         )
@@ -329,6 +335,46 @@ class MessageHandler:
             lid = messageProtocolEntity.getSenderLid()
 
         return jid, lid
+
+
+    # [salesquickly patch] 广告来源提取（只读，不影响上游逻辑）
+    @staticmethod
+    def _salesquickly_context_info(messageProtocolEntity):
+        ctx = getattr(messageProtocolEntity, "context_info", None)
+        if ctx is None:
+            media_attrs = getattr(messageProtocolEntity, "media_specific_attributes", None)
+            ctx = getattr(media_attrs, "context_info", None) if media_attrs is not None else None
+        return ctx
+
+    def _salesquickly_ad_reply(self, messageProtocolEntity):
+        try:
+            ctx = self._salesquickly_context_info(messageProtocolEntity)
+            if ctx is None:
+                return None
+            ad = ctx.external_ad_reply
+            source = ctx.entry_point_conversion_source
+            app = ctx.entry_point_conversion_app
+            if ad is None and not source:
+                return None
+            info = {"entrySource": source, "entryApp": app}
+            if ad is not None:
+                info.update({
+                    "title": ad.title,
+                    "body": ad.body,
+                    "mediaType": ad.media_type,
+                    "thumbnailUrl": ad.thumbnail_url,
+                    "sourceUrl": ad.source_url,
+                    "showAdAttribution": ad.show_ad_attribution,
+                })
+            return {k: v for k, v in info.items() if v is not None}
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _salesquickly_ad_text(self, messageProtocolEntity):
+        try:
+            return getattr(messageProtocolEntity, "text", None)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _parse_message_type(self, messageProtocolEntity):
         """Parse message type and extract text from messageProtocolEntity.

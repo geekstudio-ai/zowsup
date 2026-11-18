@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from agent.manager.bot_manager import bot_manager
 from agent.manager.account_store import account_store
@@ -101,6 +102,54 @@ async def stop_bots(req: BatchStopRequest):
         else:
             results.append(info); success += 1
     return BatchResult(results=results, success_count=success, error_count=errors)
+
+
+@router.get("/api/bot/{bot_id}/local")
+async def bot_local_state(bot_id: str):
+    """本地账号目录是否可复用（有 axolotl.db 且 prekeys>0）。
+
+    连接器恢复上号时据此跳过破坏性 import6，避免清 prekey 导致对方官方端消息 Invalid KeyId。
+    路径必须用 bot_id（相对 profile 名），不能拼 ACCOUNT_PATH 再丢进 constructPath。
+    """
+    import sqlite3
+
+    from core.common.tools import StorageTools
+    from core.axolotl.factory import AxolotlManagerFactory
+
+    dbpath = StorageTools.constructPath(bot_id, AxolotlManagerFactory.DB)
+    prekey_count = 0
+    ready = False
+    if Path(dbpath).is_file():
+        try:
+            conn = sqlite3.connect(f"file:{dbpath}?mode=ro", uri=True)
+            try:
+                prekey_count = int(conn.execute("SELECT COUNT(*) FROM prekeys").fetchone()[0] or 0)
+            finally:
+                conn.close()
+            ready = prekey_count > 0
+        except Exception as e:  # noqa: BLE001
+            logger.debug("bot local probe failed %s: %s", bot_id, e)
+    return {"bot_id": bot_id, "ready": ready, "prekey_count": prekey_count, "dbpath": dbpath}
+
+
+class EnsureBotRequest(BaseModel):
+    bot_id: str = Field(..., min_length=1)
+    env: str = Field("android", description="Device env name")
+
+
+@router.post("/api/ensurebot", response_model=BotInfo, response_model_exclude_none=True)
+async def ensure_bot(req: EnsureBotRequest):
+    """跳过 import6 时：确认本地目录存在并登记到 account_store，供 startbot 使用。"""
+    from conf.constants import SysVar
+
+    bot_id = req.bot_id.strip()
+    account_dir = Path(SysVar.ACCOUNT_PATH + bot_id)
+    if not account_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Local account dir missing for '{bot_id}'")
+    env = req.env or "android"
+    account_store.register(bot_id, env=env)
+    account_store.update_status(bot_id, "stopped", env=env)
+    return BotInfo(bot_id=bot_id, status=BotStatus.STOPPED, env=env)
 
 
 @router.post("/api/importbot", response_model=BatchResult, response_model_exclude_none=True)

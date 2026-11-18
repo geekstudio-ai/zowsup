@@ -20,9 +20,10 @@ class EnvSmbAndroid:
         self.isAxolotlEnable = isAxolotlEnable
  
         #在线计算地址_MD5_CLASSES, classes.dex拖进去就可以
-        # https://the-x.cn/zh-cn/hash/MessageDigestAlgorithm.aspx        
+        # https://the-x.cn/zh-cn/hash/MessageDigestAlgorithm.aspx
+        # 405=ClientTooOld：与 env_android 同步抬到现行附近版本（见 env_android 注释）
 
-        self.version = "2.26.25.75"
+        self.version = "2.26.44.90"
         self.md5Classes = "W3VgYQZydSZq2Iuz2/oT+g=="        
         self.key = "wt9VMkXhC2ODULqh718Itr60VOm9tYtDWKmVD+48S96rbE9zYW0K0L+6Y82FKtRku9juFnml6nDUAMxHHf0c2A=="
 
