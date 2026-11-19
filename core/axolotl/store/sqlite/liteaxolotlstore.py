@@ -5,6 +5,7 @@ from .litesessionstore import LiteSessionStore
 from .litesignedprekeystore import LiteSignedPreKeyStore
 from .litesenderkeystore import LiteSenderKeyStore
 from .litepollstore import LitePollStore
+from .litemsgsecretstore import LiteMsgSecretStore
 from .liteappstatekeystore import LiteAppStateStore
 from .litecontactstore import LiteContactStore
 from .litebroadcaststore import LiteBroadcastStore
@@ -25,7 +26,8 @@ class LiteAxolotlStore(AxolotlStore):
         self.signedPreKeyStore = LiteSignedPreKeyStore(conn)
         self.sessionStore = LiteSessionStore(conn)
         self.senderKeyStore = LiteSenderKeyStore(conn)
-        self.pollStore = LitePollStore(conn)        
+        self.pollStore = LitePollStore(conn)
+        self.msgSecretStore = LiteMsgSecretStore(conn)
         self.appStateStore = LiteAppStateStore(conn)
         self.contactStore = LiteContactStore(conn)
         self.broadcastStore = LiteBroadcastStore(conn)        

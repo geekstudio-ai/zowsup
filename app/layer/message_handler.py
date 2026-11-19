@@ -39,6 +39,15 @@ class MessageHandler:
             contact_name = None if (notify and "@" in notify) else notify
             self.layer.db._store.updateContact(jid=jid, lid=lid, name=contact_name)
 
+        # [salesquickly] 入站保留 messageSecret，供后续 secretEncryptedMessage 编辑解密
+        self._salesquickly_store_message_secret(messageProtocolEntity, jid, lid)
+
+        # [salesquickly] 新客户端编辑走 secretEncryptedMessage(MESSAGE_EDIT)，非明文 protocolMessage
+        if await self._salesquickly_handle_secret_edit(
+            messageProtocolEntity, jid, lid
+        ):
+            return
+
         # Parse message type and extract text
         msg_type, text = self._parse_message_type(messageProtocolEntity)
 
@@ -47,34 +56,16 @@ class MessageHandler:
             if messageProtocolEntity.message_attributes is not None:
                 protocol_attrs = messageProtocolEntity.message_attributes.protocol
 
-            # [salesquickly] 客户编辑：抽出新正文 + 原消息 id，经 callback 上报（勿当普通 protocol 直接 return）
+            # [salesquickly] 客户编辑（旧路径 protocol MESSAGE_EDIT）：抽出新正文 + 原消息 id
             if (
                 protocol_attrs is not None
                 and protocol_attrs.type == ProtocolAttributes.TYPE_MESSAGE_EDIT
             ):
                 edit_of, edit_text = self._salesquickly_edit_of(protocol_attrs)
                 if edit_of and edit_text:
-                    from_full = messageProtocolEntity.getFrom(True, noDevice=True)
-                    message = {
-                        "type": zowsup_pb2.MessageType.TEXT,
-                        "text": edit_text,
-                        "editOf": edit_of,
-                        "notify": messageProtocolEntity.getNotify() or None,
-                        "msgId": messageProtocolEntity.getId(),
-                        "from": messageProtocolEntity.getFrom(False),
-                        "from_full": from_full,
-                        "to": messageProtocolEntity.getTo(False)
-                        if messageProtocolEntity.fromme
-                        else self.layer.bot.botId,
-                        "participant": messageProtocolEntity.getParticipant(True),
-                        "lid": from_full,
-                        "pn_jid": messageProtocolEntity.getSenderPn(),
-                        "timestamp": messageProtocolEntity.getTimestamp()
-                        or int(time.time()),
-                        "senderPn": jid,
-                        "senderLid": lid,
-                    }
-                    self.layer.callback(message=message)
+                    self._salesquickly_emit_edit(
+                        messageProtocolEntity, jid, lid, edit_of, edit_text
+                    )
                 await self._async_send_message_acks(messageProtocolEntity)
                 return
 
@@ -406,6 +397,149 @@ class MessageHandler:
             return getattr(messageProtocolEntity, "text", None)
         except Exception:  # noqa: BLE001
             return None
+
+    def _salesquickly_emit_edit(
+        self, messageProtocolEntity, jid, lid, edit_of, edit_text
+    ):
+        from_full = messageProtocolEntity.getFrom(True, noDevice=True)
+        message = {
+            "type": zowsup_pb2.MessageType.TEXT,
+            "text": edit_text,
+            "editOf": edit_of,
+            "notify": messageProtocolEntity.getNotify() or None,
+            "msgId": messageProtocolEntity.getId(),
+            "from": messageProtocolEntity.getFrom(False),
+            "from_full": from_full,
+            "to": messageProtocolEntity.getTo(False)
+            if messageProtocolEntity.fromme
+            else self.layer.bot.botId,
+            "participant": messageProtocolEntity.getParticipant(True),
+            "lid": from_full,
+            "pn_jid": messageProtocolEntity.getSenderPn(),
+            "timestamp": messageProtocolEntity.getTimestamp() or int(time.time()),
+            "senderPn": jid,
+            "senderLid": lid,
+        }
+        self.layer.callback(message=message)
+
+    def _salesquickly_store_message_secret(self, messageProtocolEntity, jid, lid):
+        raw = getattr(messageProtocolEntity, "raw", None)
+        msg_id = messageProtocolEntity.getId()
+        if not raw or not msg_id or not self.layer.db:
+            return
+        try:
+            from proto.e2e_pb2 import Message
+
+            m = Message()
+            m.ParseFromString(raw)
+            if not m.HasField("message_context_info"):
+                return
+            secret = m.message_context_info.message_secret
+            if not secret:
+                return
+            sender = jid or lid or messageProtocolEntity.getFrom(True, noDevice=True)
+            store = getattr(self.layer.db._store, "msgSecretStore", None)
+            if store is None:
+                return
+            store.store(str(msg_id), bytes(secret), sender)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[salesquickly] store messageSecret failed id=%s",
+                msg_id,
+                exc_info=True,
+            )
+
+    async def _salesquickly_handle_secret_edit(
+        self, messageProtocolEntity, jid, lid
+    ) -> bool:
+        """解密 secretEncryptedMessage MESSAGE_EDIT；成功则 callback + ack，返回 True。"""
+        raw = getattr(messageProtocolEntity, "raw", None)
+        if not raw or not self.layer.db:
+            return False
+        try:
+            from proto.e2e_pb2 import Message
+            from core.layers.protocol_messages.protocolentities.attributes.msg_secret_edit import (
+                try_unwrap_secret_edit,
+            )
+
+            outer = Message()
+            outer.ParseFromString(raw)
+            # proto 字段名为 camelCase secretEncryptedMessage
+            has_enc = False
+            for fname in ("secretEncryptedMessage", "secret_encrypted_message"):
+                try:
+                    if outer.HasField(fname):
+                        has_enc = True
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+            if not has_enc:
+                return False
+            enc = getattr(outer, "secretEncryptedMessage", None) or getattr(
+                outer, "secret_encrypted_message", None
+            )
+            if enc is None:
+                return False
+            enc_type = getattr(enc, "secretEncType", None)
+            if enc_type is None:
+                enc_type = getattr(enc, "secret_enc_type", None)
+            # SecretEncType.MESSAGE_EDIT == 2
+            if int(enc_type or 0) != 2:
+                return False
+
+            key = getattr(enc, "targetMessageKey", None) or getattr(
+                enc, "target_message_key", None
+            )
+            target_id = getattr(key, "id", None) if key is not None else ""
+            store = getattr(self.layer.db._store, "msgSecretStore", None)
+            if store is None or not target_id:
+                self.layer.logger.warning(
+                    "[salesquickly] MESSAGE_EDIT envelope but no secret store/target id"
+                )
+                await self._async_send_message_acks(messageProtocolEntity)
+                return True
+
+            secret, stored_sender = store.get(str(target_id))
+            if not secret:
+                self.layer.logger.warning(
+                    "[salesquickly] MESSAGE_EDIT missing messageSecret for %s "
+                    "(original may predate cache — 需本侧收到原文后再编辑)",
+                    target_id,
+                )
+                await self._async_send_message_acks(messageProtocolEntity)
+                return True
+
+            editor = (
+                messageProtocolEntity.getFrom(True, noDevice=True)
+                or jid
+                or lid
+                or ""
+            )
+            edit_of, edit_text = try_unwrap_secret_edit(
+                outer,
+                editor_jid=editor,
+                message_secret=bytes(secret),
+                stored_orig_sender=stored_sender,
+            )
+            if edit_of and edit_text:
+                self.layer.logger.info(
+                    "[salesquickly] MESSAGE_EDIT decrypted id=%s text_len=%s",
+                    edit_of,
+                    len(edit_text),
+                )
+                self._salesquickly_emit_edit(
+                    messageProtocolEntity, jid, lid, edit_of, edit_text
+                )
+            else:
+                self.layer.logger.warning(
+                    "[salesquickly] MESSAGE_EDIT decrypt/parse failed id=%s",
+                    target_id,
+                )
+            await self._async_send_message_acks(messageProtocolEntity)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("[salesquickly] secret MESSAGE_EDIT handler error")
+            return False
 
     @staticmethod
     def _salesquickly_edit_of(protocol_attrs):
