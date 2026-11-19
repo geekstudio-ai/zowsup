@@ -509,31 +509,49 @@ class MessageHandler:
                 await self._async_send_message_acks(messageProtocolEntity)
                 return True
 
-            editor = (
-                messageProtocolEntity.getFrom(True, noDevice=True)
-                or jid
-                or lid
-                or ""
+            # 群聊编辑：HKDF 的 editor / origSender 是发言人 participant，不是群 JID。
+            # 误用 getFrom()（群 id）会导致 decrypt 失败，私聊仍可用 from。
+            from_full = messageProtocolEntity.getFrom(True, noDevice=True) or ""
+            participant = messageProtocolEntity.getParticipant(True)
+            participant_pn = None
+            try:
+                participant_pn = messageProtocolEntity.getParticipantPn(True)
+            except Exception:  # noqa: BLE001
+                participant_pn = None
+            is_group = bool(participant) or from_full.endswith("@g.us") or from_full.endswith(
+                "@newsletter"
             )
+            if is_group:
+                editor = participant or participant_pn or jid or lid or ""
+            else:
+                editor = from_full or jid or lid or ""
             edit_of, edit_text = try_unwrap_secret_edit(
                 outer,
                 editor_jid=editor,
                 message_secret=bytes(secret),
                 stored_orig_sender=stored_sender,
+                extra_editor_jids=(participant, participant_pn, jid, lid, from_full),
             )
             if edit_of and edit_text:
                 self.layer.logger.info(
-                    "[salesquickly] MESSAGE_EDIT decrypted id=%s text_len=%s",
+                    "[salesquickly] MESSAGE_EDIT decrypted id=%s text_len=%s group=%s editor=%s",
                     edit_of,
                     len(edit_text),
+                    is_group,
+                    editor,
                 )
                 self._salesquickly_emit_edit(
                     messageProtocolEntity, jid, lid, edit_of, edit_text
                 )
             else:
                 self.layer.logger.warning(
-                    "[salesquickly] MESSAGE_EDIT decrypt/parse failed id=%s",
+                    "[salesquickly] MESSAGE_EDIT decrypt/parse failed id=%s "
+                    "group=%s editor=%s participant=%s from=%s",
                     target_id,
+                    is_group,
+                    editor,
+                    participant,
+                    from_full,
                 )
             await self._async_send_message_acks(messageProtocolEntity)
             return True

@@ -16,6 +16,7 @@ from ...common.tools import WATools
 from ...layers.protocol_acks.protocolentities.ack_incoming import IncomingAckProtocolEntity
 
 from ...structs import  ProtocolTreeNode
+import asyncio
 import base64,os
 
 import logging
@@ -54,16 +55,6 @@ class AxolotlSendLayer(AxolotlBaseLayer):
             await self.toLower(node)
 
     async def receive(self, protocolTreeNode) -> Any:
-        async def on_get_keys_success(node, retry_entity, success_jids, errors):                        
-            if len(errors):                
-                self.on_get_keys_process_errors(errors)
-            elif len(success_jids) == 1:                                        
-                await self.processPlaintextNodeAndSend(node, retry_entity)
-                #self.sendToContactsWithSessions(node, success_jids) 
-                #self.sendToGroupWithSessions(node,None)
-            else:
-                raise NotImplementedError()
-
         if not await self.processIqRegistry(protocolTreeNode):
             if protocolTreeNode.tag == "receipt":
                 '''
@@ -77,11 +68,19 @@ class AxolotlSendLayer(AxolotlBaseLayer):
                     retryReceiptEntity = RetryIncomingReceiptProtocolEntity.fromProtocolTreeNode(protocolTreeNode)
                     await self.toLower(retryReceiptEntity.ack().toProtocolTreeNode()) #对重试那个包的ack，遵循协议    
                     if messageNode :
-                        logger.info("Got retry to from {} for message {}, and Axolotl layer has the message".format(protocolTreeNode["from"],protocolTreeNode["id"]))
-                        successJids, errors = await self.getKeysFor(
-                            [protocolTreeNode["participant"] or protocolTreeNode["from"]]
+                        retry_jid = protocolTreeNode["participant"] or protocolTreeNode["from"]
+                        logger.info(
+                            "Got retry to from %s for message %s, and Axolotl layer has the message",
+                            protocolTreeNode["from"],
+                            protocolTreeNode["id"],
                         )
-                        await on_get_keys_success(messageNode, retryReceiptEntity, successJids, errors)         
+                        # [salesquickly] 切勿在 receive 链里 await getKeysFor：
+                        # 会堵住 socket 读循环，encrypt IQ 回包无法被 processIqRegistry，
+                        # 30s 超时后旧代码再 raise NotImplementedError → LOGOUT，
+                        # 对方手机一直停在「正在等待此消息」（缺 sender key / SKDM）。
+                        asyncio.ensure_future(
+                            self._handle_retry_receipt(messageNode, retryReceiptEntity, retry_jid)
+                        )
                     else:
                         logger.debug("ignore retry receipt, because message not found in Axolotl")               
 
@@ -89,6 +88,33 @@ class AxolotlSendLayer(AxolotlBaseLayer):
                     #logger.debug("bubbling non-retry-receipt upwards")
                     await self.toUpper(protocolTreeNode)                    
 
+    async def _handle_retry_receipt(self, message_node, retry_entity, retry_jid) -> None:
+        """[salesquickly] 在 receive 链外处理 retry：取钥（如需）后重发含 SKDM 的密文。"""
+        try:
+            if not retry_jid or retry_jid.endswith("@g.us") or "@broadcast" in retry_jid:
+                logger.error("Invalid retry jid %s, skip re-encrypt", retry_jid)
+                return
+            username = retry_jid.split("@")[0]
+            if not self.manager.session_exists(username):
+                success_jids, errors = await self.getKeysFor([retry_jid], reason="retry")
+                if errors:
+                    self.on_get_keys_process_errors(errors)
+                if not success_jids:
+                    logger.error(
+                        "Retry getKeys failed for %s (errors=%s); cannot re-send SKDM",
+                        retry_jid,
+                        list(errors.keys()) if errors else [],
+                    )
+                    return
+            else:
+                logger.debug("Retry jid %s already has session, skip getKeys", retry_jid)
+            await self.processPlaintextNodeAndSend(message_node, retry_entity)
+        except Exception:
+            logger.exception(
+                "Failed handling retry receipt for %s msg=%s",
+                retry_jid,
+                message_node["id"] if message_node is not None else None,
+            )
 
     def on_get_keys_process_errors(self, errors) -> Any:
         # type: (dict) -> None
@@ -430,9 +456,22 @@ class AxolotlSendLayer(AxolotlBaseLayer):
                 logger.error("Failed to get group info: %s", e)
                 return
             groupInfo = InfoGroupsResultIqProtocolEntity.fromProtocolTreeNode(result_dict["result"])
-            jids = list(groupInfo.getParticipants().keys())  # keys in py3 returns dict_keys
-            if ownJid in jids:
-                jids.remove(ownJid)
+            # [salesquickly] LID 寻址群：participants 键是 PN，真正加密对象应用 @lid，
+            # 否则 SKDM 落到 PN 会话上，对方设备（LID）解不开 →「正在等待此消息」。
+            participant_lids = getattr(groupInfo, "participant_lids", None) or {}
+            jids = []
+            for pn in groupInfo.getParticipants().keys():
+                if pn == ownJid:
+                    continue
+                lid = participant_lids.get(pn)
+                jids.append(lid if lid else pn)
+            own_lid = None
+            try:
+                own_lid = self.getProp("profile").config.lid
+            except Exception:
+                own_lid = None
+            if own_lid and own_lid in jids:
+                jids.remove(own_lid)
             await self.ensureSessionsAndSendToGroup(node, jids)
         else:
             logger.debug("We have a senderKeyRecord")

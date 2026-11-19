@@ -39,6 +39,9 @@ def _jid_candidates(*jids: Optional[str]) -> List[str]:
         bare = bare_jid(jid)
         if not bare or bare in seen:
             continue
+        # 群 / 频道 JID 不能当 Message Edit 的 editor/origSender
+        if bare.endswith("@g.us") or bare.endswith("@newsletter"):
+            continue
         seen.add(bare)
         out.append(bare)
         # LID ↔ PN 互换候选（GCM 会拒绝错误组合）
@@ -170,6 +173,7 @@ def try_unwrap_secret_edit(
     editor_jid: str,
     message_secret: bytes,
     stored_orig_sender: Optional[str] = None,
+    extra_editor_jids: Optional[Sequence[Optional[str]]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Return (edit_of_id, new_text) or (None, None)."""
     if not _has_secret_edit(outer):
@@ -195,16 +199,22 @@ def try_unwrap_secret_edit(
         return None, None
 
     from_me = bool(getattr(key, "from_me", False))
-    editor_cands = _jid_candidates(editor_jid)
+    extra = tuple(extra_editor_jids or ())
+    # 群聊必须优先 participant（@lid / PN），不要把群 @g.us 当 editor
+    editor_cands = _jid_candidates(editor_jid, *extra, stored_orig_sender)
+    key_participant = getattr(key, "participant", None) or None
     if from_me:
-        # 对方编辑自己的消息：原发送者 = 编辑者
-        orig_cands = _jid_candidates(editor_jid, stored_orig_sender)
+        # 对方编辑自己的消息：原发送者 = 编辑者（群内=participant）
+        orig_cands = _jid_candidates(
+            editor_jid, *extra, stored_orig_sender, key_participant
+        )
     else:
         orig_cands = _jid_candidates(
-            getattr(key, "participant", None) or None,
+            key_participant,
             getattr(key, "remote_jid", None) or None,
             stored_orig_sender,
             editor_jid,
+            *extra,
         )
 
     if not editor_cands or not orig_cands:
