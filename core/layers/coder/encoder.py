@@ -160,7 +160,8 @@ class WriteEncoder:
     def encodeString(self, string) -> Any:
         if type(string) == bytes:
             return string
-        return string.encode('latin-1')
+        # [salesquickly] 原 latin-1 无法编码中文/emoji，且与 decoder 的 UTF-8 不对齐
+        return string.encode('utf-8')
 
     def writeJid(self, user, server, data) -> Any:
         if user.find(":") != -1:

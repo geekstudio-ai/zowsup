@@ -219,22 +219,24 @@ class ReadDecoder:
             raise Exception("readString couldn't reconstruct jid")
 
         if token in (251, 255):
-            return "".join(map(chr, self.readPacked8(token, data)))
+            # packed nibble 多为 ASCII 号码；用 utf-8 与 chr 对 ASCII 等价，且避免非 ASCII 乱码
+            return bytes(self.readPacked8(token, data)).decode("utf-8", errors="replace")
 
         if token == 252:
             size8 = self.readInt8(data)
             buf8 = self.readArray(size8, data)
-            return "".join(map(chr, buf8))
+            # [salesquickly] 原 "".join(map(chr, buf)) = latin-1，UTF-8 群名「群」会变成「ç¾¤」
+            return bytes(buf8).decode("utf-8", errors="replace")
 
         if token == 253:
             size20 = self.readInt20(data)
             buf20 = self.readArray(size20, data)
-            return "".join(map(chr, buf20))
+            return bytes(buf20).decode("utf-8", errors="replace")
 
         if token == 254:
             size31 = self.readInt31()
             buf31 = self.readArray(size31, data)
-            return "".join(map(chr, buf31))
+            return bytes(buf31).decode("utf-8", errors="replace")
 
 
         raise Exception("readString couldn't match token "+str(token))
