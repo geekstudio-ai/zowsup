@@ -47,6 +47,37 @@ class MessageHandler:
             if messageProtocolEntity.message_attributes is not None:
                 protocol_attrs = messageProtocolEntity.message_attributes.protocol
 
+            # [salesquickly] 客户编辑：抽出新正文 + 原消息 id，经 callback 上报（勿当普通 protocol 直接 return）
+            if (
+                protocol_attrs is not None
+                and protocol_attrs.type == ProtocolAttributes.TYPE_MESSAGE_EDIT
+            ):
+                edit_of, edit_text = self._salesquickly_edit_of(protocol_attrs)
+                if edit_of and edit_text:
+                    from_full = messageProtocolEntity.getFrom(True, noDevice=True)
+                    message = {
+                        "type": zowsup_pb2.MessageType.TEXT,
+                        "text": edit_text,
+                        "editOf": edit_of,
+                        "notify": messageProtocolEntity.getNotify() or None,
+                        "msgId": messageProtocolEntity.getId(),
+                        "from": messageProtocolEntity.getFrom(False),
+                        "from_full": from_full,
+                        "to": messageProtocolEntity.getTo(False)
+                        if messageProtocolEntity.fromme
+                        else self.layer.bot.botId,
+                        "participant": messageProtocolEntity.getParticipant(True),
+                        "lid": from_full,
+                        "pn_jid": messageProtocolEntity.getSenderPn(),
+                        "timestamp": messageProtocolEntity.getTimestamp()
+                        or int(time.time()),
+                        "senderPn": jid,
+                        "senderLid": lid,
+                    }
+                    self.layer.callback(message=message)
+                await self._async_send_message_acks(messageProtocolEntity)
+                return
+
             if protocol_attrs is not None and protocol_attrs.type in (
                 ProtocolAttributes.TYPE_HISTORY_SYNC_NOTIFICATION,
                 ProtocolAttributes.TYPE_APP_STATE_SYNC_KEY_SHARE,
@@ -375,6 +406,24 @@ class MessageHandler:
             return getattr(messageProtocolEntity, "text", None)
         except Exception:  # noqa: BLE001
             return None
+
+    @staticmethod
+    def _salesquickly_edit_of(protocol_attrs):
+        """MESSAGE_EDIT → (原消息 id, 新正文)。缺任一则返回 (None, None)。"""
+        try:
+            key = getattr(protocol_attrs, "key", None)
+            edit_of = getattr(key, "id", None) if key is not None else None
+            edited = getattr(protocol_attrs, "edited_message", None)
+            if not edit_of or edited is None:
+                return None, None
+            text = getattr(edited, "conversation", None) or ""
+            if not text:
+                ext = getattr(edited, "extended_text", None)
+                text = getattr(ext, "text", None) or "" if ext is not None else ""
+            text = (text or "").strip()
+            return (str(edit_of), text) if text else (None, None)
+        except Exception:  # noqa: BLE001
+            return None, None
 
     def _parse_message_type(self, messageProtocolEntity):
         """Parse message type and extract text from messageProtocolEntity.
