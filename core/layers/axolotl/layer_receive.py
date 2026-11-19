@@ -76,6 +76,8 @@ class AxolotlReceivelayer(AxolotlBaseLayer):
             # [salesquickly] 六段号换机/换栈后，对方仍用旧 session 加密时常见 Invalid KeyId。
             # 上游直接 ACK 丢弃会导致「已上线却收不到消息」；改为与 InvalidMessage 一样发 retry，
             # 让对方用新 prekey/session 重推。仍失败满 3 次再 ACK 放弃。
+            # SQ_RETRY_KEYS：retry 必须附带本地公钥包。否则对方仍去服务器取公钥包，而服务器上的
+            # 公钥包可能已被别处登录的同号覆盖，重推多少次都解不开。
             author = encMessageProtocolEntity.getAuthor(False)
             if node["id"] in self._retries and self._retries[node["id"]] >= 3:
                 logger.warning(
@@ -94,7 +96,7 @@ class AxolotlReceivelayer(AxolotlBaseLayer):
                 )
                 import asyncio
                 await asyncio.sleep(1)
-                await self.send_retry(node, self.manager.registration_id)
+                await self.send_retry(node, self.manager.registration_id, include_keys=True)
 
         except exceptions.InvalidMessageException:
             logger.warning("InvalidMessage for {}".format(encMessageProtocolEntity.getAuthor(False)))     
@@ -244,7 +246,7 @@ class AxolotlReceivelayer(AxolotlBaseLayer):
             skmsgdata=senderKeyDistributionMessage.axolotl_sender_key_distribution_message
         )
 
-    async def send_retry(self, message_node, registration_id) -> Any:
+    async def send_retry(self, message_node, registration_id, include_keys=False) -> Any:
         message_id = message_node["id"]
         if message_id in self._retries:
             count = self._retries[message_id]
@@ -252,8 +254,22 @@ class AxolotlReceivelayer(AxolotlBaseLayer):
         else:
             count = 1
         self._retries[message_id] = count
-        retry = RetryOutgoingReceiptProtocolEntity.fromMessageNode(message_node, registration_id)
+        # [salesquickly] SQ_RETRY_KEYS：和 baileys 一样，第 2 次起附带本地公钥包；
+        # Invalid KeyId 说明对方用的公钥包本地没有，从第 1 次就附带。
+        keys = None
+        if include_keys or count >= 2:
+            try:
+                keys = self.manager.build_retry_keys()
+            except Exception:  # noqa: BLE001
+                logger.warning("[salesquickly] build retry keys failed, send retry without keys", exc_info=True)
+        retry = RetryOutgoingReceiptProtocolEntity.fromMessageNode(message_node, registration_id, keys=keys)
         retry.count = count
+        if keys:
+            logger.info(
+                "[salesquickly] retry receipt with keys: id={} to={} count={} prekey_id={} skey_id={}".format(
+                    message_id, message_node["from"], count, keys["prekey_id"], keys["skey_id"]
+                )
+            )
         await self.toLower(retry.toProtocolTreeNode())
 
     def reset_retries(self, message_id) -> Any:

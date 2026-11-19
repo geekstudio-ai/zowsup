@@ -91,8 +91,15 @@ class Import6(ConsoleMain):
         # [salesquickly] 同身份且已有 prekeys：完全不动本地目录，避免写坏 config / 清密钥。
         same_identity, prekey_count = _probe_local_crypto(phone, pubKey, privKey)
         if same_identity and prekey_count > 0:
+            # SQ_REKEY：重新导入同一个号，通常是因为这个号在别处登录过、本地收不到消息。
+            # 本地密钥不动，但标记下次登录时把公钥包重传到服务器（自动重连走 ensurebot，不经过这里）。
+            from core.axolotl.rekey import request_rekey
+            request_rekey(
+                os.path.dirname(StorageTools.constructPath(phone, AxolotlManagerFactory.DB)),
+                "import6_reuse",
+            )
             logger.info(
-                "[salesquickly] import6 reuse local crypto phone=%s prekeys=%s (no-op)",
+                "[salesquickly] import6 reuse local crypto phone=%s prekeys=%s (rekey on next login)",
                 phone,
                 prekey_count,
             )

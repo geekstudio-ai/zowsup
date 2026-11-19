@@ -109,6 +109,13 @@ class ConnectionManager:
             self.layer.bot.conflict = True
             self.layer.bot.status = ZowBotStatus.STATUS_CONFLICTED
             self.layer.bot.quitIfConflict = True
+            # [salesquickly] SQ_REKEY：被别处登录抢占，对方登录时可能已用它自己的公钥包覆盖了
+            # 服务器上的那份。标记本实例下次登录时重传，否则联系人发来的 pkmsg 在本地报 Invalid KeyId。
+            try:
+                from core.axolotl.rekey import request_rekey
+                request_rekey(getattr(self.layer.db, "db_dir", None), "conflict")
+            except Exception:  # noqa: BLE001
+                self.layer.logger.warning("[salesquickly] request rekey on conflict failed", exc_info=True)
             # Clear botId on conflict — the session is replaced by another device,
             # so the botId is no longer valid for this instance.
             old_botId = self.layer.bot.botId

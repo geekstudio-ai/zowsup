@@ -8,6 +8,7 @@ from ...layers.protocol_acks.protocolentities import OutgoingAckProtocolEntity
 from ...layers.protocol_iq.protocolentities          import *
 from ...layers.protocol_ib.protocolentities          import *
 from ...axolotl.manager import AxolotlManager
+from ...axolotl.rekey import read_rekey_request, clear_rekey_request
 from axolotl.util.hexutil import HexUtil
 from axolotl.ecc.curve import Curve
 
@@ -73,12 +74,35 @@ class AxolotlControlLayer(AxolotlBaseLayer):
         if self.manager is not None:            
             if self.getProp("HC_MODE",False) or self.getProp("TRANSFER6_MODE"):
                 self.setProp(YowAuthenticationProtocolLayer.PROP_PASSIVE, False)            
-            else :        
-                self.manager.level_prekeys()                
+            else :
+                self._maybe_rekey()
+                self.manager.level_prekeys()
                 self._unsent_prekeys.extend(self.manager.load_unsent_prekeys())           
                 if len(self._unsent_prekeys):
                     self.setProp(YowAuthenticationProtocolLayer.PROP_PASSIVE, True)
     
+    def _maybe_rekey(self) -> None:
+        """[salesquickly] SQ_REKEY：有重传标记时生成新的 signed prekey + 一批新 prekey。
+
+        新 prekey 未上传，随后 load_unsent_prekeys 会把连接置为 PASSIVE，onAuthed 里
+        flush_keys 把 identity / registration / 最新 signed prekey / prekeys 一起上传，
+        覆盖服务器上（可能被别处登录的同号覆盖过的）公钥包。见 core/axolotl/rekey.py。
+        """
+        account_dir = getattr(self.manager, "db_dir", None)
+        reason = read_rekey_request(account_dir)
+        if reason is None:
+            return
+        try:
+            signed_prekey, prekeys = self.manager.rekey()
+        except Exception:  # noqa: BLE001
+            logger.exception("[salesquickly] rekey failed, keep marker for next connect: %s", account_dir)
+            return
+        clear_rekey_request(account_dir)
+        logger.info(
+            "[salesquickly] rekey done: dir=%s reason=%s signed_prekey_id=%s new_prekeys=%d (upload after auth)",
+            account_dir, reason, signed_prekey.getId(), len(prekeys),
+        )
+
     @EventCallback(YowAuthenticationProtocolLayer.EVENT_AUTHED)
     async def onAuthed(self, yowLayerEvent) -> Any:
 

@@ -52,6 +52,8 @@ class AxolotlManager:
         self._group_session_builder = GroupSessionBuilder(self._store) # type: GroupSessionBuilder
         self._session_ciphers = {} # type: dict[str, SessionCipher]
         self._group_ciphers = {} # type: dict[str, GroupCipher]
+        # [salesquickly] SQ_REKEY：axolotl.db 所在目录，由 AxolotlManagerFactory 设置
+        self.db_dir = None # type: str | None
         logger.debug(f"Initialized AxolotlManager [username={self._username}, db={store}]")
 
 
@@ -112,7 +114,7 @@ class AxolotlManager:
         latest_signed_prekey = self.load_latest_signed_prekey(generate=False)
         if latest_signed_prekey is not None:                        
             if latest_signed_prekey.getId() == self.MAX_SIGNED_PREKEY_ID:
-                new_signed_prekey_id = (self.MAX_SIGNED_PREKEY_ID / 2) + 1
+                new_signed_prekey_id = (self.MAX_SIGNED_PREKEY_ID // 2) + 1
             else:
                 new_signed_prekey_id = latest_signed_prekey.getId() + 1
         else:
@@ -128,7 +130,42 @@ class AxolotlManager:
             return signed_prekeys[-1]
 
         return self.generate_signed_prekey() if generate else None
-    
+
+    def rekey(self) -> Tuple[Any, List[Any]]:
+        """[salesquickly] SQ_REKEY：生成新的 signed prekey 和一批新 prekey（未上传）。
+
+        之后由 AxolotlControlLayer 的 PASSIVE 流程（load_unsent_prekeys +
+        load_latest_signed_prekey）在登录后一起上传，覆盖服务器上的公钥包。
+        已建立的会话不依赖 signed prekey，不受影响；旧 signed prekey 仍留在本地，
+        对方用旧公钥包发来的 pkmsg 照样能解。
+        """
+        signed_prekey = self.generate_signed_prekey()
+        prekeys = self.level_prekeys(force=True)
+        return signed_prekey, prekeys
+
+    def build_retry_keys(self) -> Dict[str, Any]:
+        """[salesquickly] SQ_RETRY_KEYS：retry 回执里附带的本地公钥包。
+
+        对方收到带 <keys> 的 retry 后，直接用这里的 key 建立新会话，不再依赖服务器上
+        的公钥包（服务器上的公钥包可能已被别处登录的同号覆盖）。
+
+        prekey 每次新生成一个，标记为已上传：它只发给这一个对方，不进服务器的 prekey
+        池，也不会触发下次连接时的 PASSIVE 重传。
+        """
+        max_prekey_id = self._store.preKeyStore.loadMaxPreKeyId()
+        prekey = KeyHelper.generatePreKeys(max_prekey_id + 1, 1)[0]
+        self._store.preKeyStore.storePreKeyBatch([(prekey.getId(), prekey)])
+        self._store.preKeyStore.setAsSent([prekey.getId()])
+        signed_prekey = self.load_latest_signed_prekey(generate=True)
+        return {
+            "identity": self._identity.getPublicKey().serialize()[1:],
+            "prekey_id": prekey.getId(),
+            "prekey": prekey.getKeyPair().getPublicKey().serialize()[1:],
+            "skey_id": signed_prekey.getId(),
+            "skey": signed_prekey.getKeyPair().getPublicKey().serialize()[1:],
+            "skey_signature": signed_prekey.getSignature(),
+        }
+
     def _get_session_cipher(self, recipientId,recipientType,deviceid=0):        
         key = "{}.{}:{}".format(recipientId,recipientType,deviceid)        
         logger.debug("get_session_cipher(username={})".format(key))

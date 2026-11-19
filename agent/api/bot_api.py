@@ -129,7 +129,46 @@ async def bot_local_state(bot_id: str):
             ready = prekey_count > 0
         except Exception as e:  # noqa: BLE001
             logger.debug("bot local probe failed %s: %s", bot_id, e)
-    return {"bot_id": bot_id, "ready": ready, "prekey_count": prekey_count, "dbpath": dbpath}
+    from core.axolotl.rekey import read_rekey_request
+
+    rekey_pending = read_rekey_request(str(Path(dbpath).parent))
+    return {
+        "bot_id": bot_id,
+        "ready": ready,
+        "prekey_count": prekey_count,
+        "dbpath": dbpath,
+        "rekey_pending": rekey_pending,
+    }
+
+
+class RekeyBotRequest(BaseModel):
+    bot_ids: list[str] = Field(..., min_length=1, description="要重传公钥包的 bot（手机号）")
+
+
+@router.post("/api/rekeybot", response_model=dict)
+async def rekey_bots(req: RekeyBotRequest):
+    """[salesquickly] SQ_REKEY：标记下次登录时向服务器重传整套公钥包。
+
+    用于同号在别处登录过、服务器上的公钥包被覆盖、本实例收消息报 Invalid KeyId 的情况。
+    只写标记，不改本地密钥；bot 正在运行时需要重新上线（断开 → 上线）才会生效。
+    """
+    from conf.constants import SysVar
+    from core.axolotl.rekey import request_rekey
+
+    results = {}
+    for raw in req.bot_ids:
+        bot_id = raw.strip()
+        account_dir = Path(SysVar.ACCOUNT_PATH) / bot_id
+        marked = account_dir.is_dir() and request_rekey(str(account_dir), "api_rekeybot")
+        info = bot_manager.get_bot(bot_id)
+        running = bool(info and info.status == BotStatus.RUNNING)
+        results[bot_id] = {
+            "marked": marked,
+            "running": running,
+            "error": None if marked else "local account dir missing",
+            "next_step": "disconnect and log in again" if marked and running else None,
+        }
+    return {"results": results}
 
 
 class EnsureBotRequest(BaseModel):

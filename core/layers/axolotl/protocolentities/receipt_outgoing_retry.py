@@ -16,7 +16,7 @@ class RetryOutgoingReceiptProtocolEntity(OutgoingReceiptProtocolEntity):
     </receipt>
     '''
 
-    def __init__(self, _id, jid, local_registration_id, retry_timestamp, v=1, count=1, participant=None) -> None:
+    def __init__(self, _id, jid, local_registration_id, retry_timestamp, v=1, count=1, participant=None, keys=None) -> None:
         super().__init__(_id, jid, participant=participant)
         '''
             Note to self: Android clients won't retry sending if the retry node didn't contain the message timestamp
@@ -25,6 +25,8 @@ class RetryOutgoingReceiptProtocolEntity(OutgoingReceiptProtocolEntity):
         self.v = v
         self.retry_timestamp = retry_timestamp
         self.count = count
+        # [salesquickly] SQ_RETRY_KEYS：AxolotlManager.build_retry_keys() 的结果，None 表示不附带
+        self.keys = keys
 
     @property
     def local_registration_id(self) -> Any:
@@ -77,7 +79,26 @@ class RetryOutgoingReceiptProtocolEntity(OutgoingReceiptProtocolEntity):
             data=ResultGetKeysIqProtocolEntity._intToBytes(self.local_registration_id)
         )
         node.addChild(registration)
-        
+
+        # [salesquickly] SQ_RETRY_KEYS：附带本地公钥包，格式与 baileys sendRetryRequest 一致。
+        # 对方据此直接建立新会话，不再去服务器取（可能已被别处登录的同号覆盖的）公钥包。
+        # zowsup 是主设备，没有 ADV 签名身份，所以不带 device-identity。
+        if self.keys:
+            k = self.keys
+            node.addChild(ProtocolTreeNode("keys", children=[
+                ProtocolTreeNode("type", data=b"\x05"),
+                ProtocolTreeNode("identity", data=k["identity"]),
+                ProtocolTreeNode("key", children=[
+                    ProtocolTreeNode("id", data=int(k["prekey_id"]).to_bytes(3, "big")),
+                    ProtocolTreeNode("value", data=k["prekey"]),
+                ]),
+                ProtocolTreeNode("skey", children=[
+                    ProtocolTreeNode("id", data=int(k["skey_id"]).to_bytes(3, "big")),
+                    ProtocolTreeNode("value", data=k["skey"]),
+                    ProtocolTreeNode("signature", data=k["skey_signature"]),
+                ]),
+            ]))
+
         return node
 
     def __str__(self):
@@ -99,11 +120,12 @@ class RetryOutgoingReceiptProtocolEntity(OutgoingReceiptProtocolEntity):
         return entity
 
     @staticmethod
-    def fromMessageNode(message_node, local_registration_id):
+    def fromMessageNode(message_node, local_registration_id, keys=None):
         return RetryOutgoingReceiptProtocolEntity(
             message_node.getAttributeValue("id"),
             message_node.getAttributeValue("from"),
             local_registration_id,
             message_node.getAttributeValue("t"),
-            participant=message_node.getAttributeValue("participant")
+            participant=message_node.getAttributeValue("participant"),
+            keys=keys,
         )
